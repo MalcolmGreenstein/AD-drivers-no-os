@@ -33,6 +33,7 @@
 
 #include "no_os_spi.h"
 #include "xilinx_spi.h"
+#include "xilinx_gpio.h"
 #include "hmc7044.h"
 #ifdef QUAD_MXFE
 #include "adf4371.h"
@@ -40,6 +41,7 @@
 #include "xilinx_gpio.h"
 #endif
 #include "no_os_error.h"
+#include "no_os_gpio.h"
 #include "parameters.h"
 #include "app_clock.h"
 
@@ -199,6 +201,11 @@ int32_t app_clock_init(struct no_os_clk dev_refclk[MULTIDEVICE_INSTANCE_COUNT])
 			.divider = 1536,	// 1.953125 MHz
 			.driver_mode = 2,	// LVDS
 			.is_sysref = true,
+			.dynamic_driver_enable = 1,
+			.high_performance_mode_dis = 1,
+			.start_up_mode_dynamic_enable = 1,
+			.force_mute_enable = 1,
+			.driver_impedance = 1,
 		}, {
 			.num = 6,		// CORE_CLK_TX
 			.divider = 12,		// 250 MHz
@@ -220,6 +227,11 @@ int32_t app_clock_init(struct no_os_clk dev_refclk[MULTIDEVICE_INSTANCE_COUNT])
 			.divider = 1536,	// 1.953125 MHz
 			.driver_mode = 2,	// LVDS
 			.is_sysref = true,
+			.dynamic_driver_enable = 1,
+			.high_performance_mode_dis = 1,
+			.start_up_mode_dynamic_enable = 1,
+			.force_mute_enable = 1,
+			.driver_impedance = 1,
 		}
 	};
 #elif defined(PLATFORM_MB)
@@ -278,17 +290,18 @@ int32_t app_clock_init(struct no_os_clk dev_refclk[MULTIDEVICE_INSTANCE_COUNT])
 		.pll1_cp_current = 0,
 		.pll2_freq = 3000000000,
 		.pll1_loop_bw = 200,
-		.sysref_timer_div = 1024,
+		.sysref_timer_div = 3072,
 		.in_buf_mode = {0x07, 0x07, 0x00, 0x00, 0x15},
 		.gpi_ctrl = {0x00, 0x00, 0x00, 0x00},
-		.gpo_ctrl = {0x37, 0x33, 0x00, 0x00},
+		.gpo_ctrl = {0x37, 0x2F, 0x00, 0x00},
 		.num_channels = sizeof(chan_spec) /
 		sizeof(struct hmc7044_chan_spec),
-		.pll1_ref_prio_ctrl = 0xe4,
+		.pll1_ref_prio_ctrl = 0x55,
 		.pll1_ref_autorevert_en = false,
 		.sync_pin_mode = 0x1,
-		.high_performance_mode_clock_dist_en = false,
-		.pulse_gen_mode = 0x0,
+		.high_performance_mode_clock_dist_en = true,
+		.hmc_two_level_tree_sync_en = true,
+		.pulse_gen_mode = 0x7,
 		.channels = chan_spec
 	};
 #endif
