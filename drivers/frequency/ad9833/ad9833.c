@@ -464,9 +464,22 @@ void ad9833_sleep_mode(struct ad9833_dev *dev,
 /**************************************************************************//**
  * @brief Loads a frequency value in a register.
  *
- * @param dev             - The device structure.
- * @param register_number - Number of the register (0 / 1).
- * @param frequency_value - Frequency value.
+ * This function programs a frequency value into one of the two frequency registers.
+ * The frequency is converted to a 28-bit value using the device-specific frequency
+ * constant and loaded into the specified register via SPI transactions.
+ * 
+ * Frequency calculation: freq_register = frequency_hz * freq_const
+ * where freq_const = 2^28 / master_clock_frequency
+ * 
+ * The 28-bit frequency value is split into two 14-bit words:
+ * - LSB (bits 13:0) sent first
+ * - MSB (bits 27:14) sent second
+ * 
+ * The B28 bit is set to ensure both words are written atomically.
+ *
+ * @param dev             - The device structure
+ * @param register_number - Frequency register number (0 or 1)
+ * @param frequency_value - Frequency value in Hz
  *
 ******************************************************************************/
 void ad9833_set_freq(struct ad9833_dev *dev,
@@ -476,32 +489,57 @@ void ad9833_set_freq(struct ad9833_dev *dev,
 	uint32_t ul_freq_register;
 	uint16_t i_freq_lsb, i_freq_msb;
 
+	DEBUG_PRINT("Setting frequency: %lu Hz in register: %d", frequency_value, register_number);
+
+	/* Convert frequency to 28-bit register value using device-specific constant */
 	ul_freq_register = (uint32_t)(frequency_value *
 				      chip_info[dev->act_device].freq_const);
-	i_freq_lsb = (ul_freq_register & 0x0003FFF);
-	i_freq_msb = ((ul_freq_register & 0xFFFC000) >> 14);
+	
+	DEBUG_PRINT("Calculated frequency register value: 0x%08lX", ul_freq_register);
+
+	/* Split 28-bit value into two 14-bit words */
+	i_freq_lsb = (ul_freq_register & 0x0003FFF);        /* Lower 14 bits */
+	i_freq_msb = ((ul_freq_register & 0xFFFC000) >> 14); /* Upper 14 bits */
+
+	DEBUG_PRINT("Frequency words - LSB: 0x%04X, MSB: 0x%04X", i_freq_lsb, i_freq_msb);
+
+	/* Set B28 bit to enable 28-bit frequency register writes */
+	/* This ensures both LSB and MSB are loaded atomically */
 	dev->ctrl_reg_value |= AD9833_CTRLB28;
-	ad9833_tx_spi(dev,
-		      dev->ctrl_reg_value);
+	ad9833_tx_spi(dev, dev->ctrl_reg_value);
+
+	/* Write frequency data to selected register */
 	if (register_number == 0) {
-		ad9833_tx_spi(dev,
-			      BIT_F0ADDRESS + i_freq_lsb);
-		ad9833_tx_spi(dev,
-			      BIT_F0ADDRESS + i_freq_msb);
+		/* Program Frequency Register 0 */
+		DEBUG_PRINT("Writing to Frequency Register 0");
+		ad9833_tx_spi(dev, BIT_F0ADDRESS + i_freq_lsb);  /* LSB first */
+		ad9833_tx_spi(dev, BIT_F0ADDRESS + i_freq_msb);  /* MSB second */
 	} else {
-		ad9833_tx_spi(dev,
-			      BIT_F1ADDRESS + i_freq_lsb);
-		ad9833_tx_spi(dev,
-			      BIT_F1ADDRESS + i_freq_msb);
+		/* Program Frequency Register 1 */
+		DEBUG_PRINT("Writing to Frequency Register 1");
+		ad9833_tx_spi(dev, BIT_F1ADDRESS + i_freq_lsb);  /* LSB first */
+		ad9833_tx_spi(dev, BIT_F1ADDRESS + i_freq_msb);  /* MSB second */
 	}
+
+	DEBUG_PRINT("Frequency programming completed for register %d", register_number);
 }
 
 /**************************************************************************//**
  * @brief Loads a phase value in a register.
  *
- * @param dev             - The device structure.
- * @param register_number - Number of the register (0 / 1).
- * @param phase_value     - Phase value.
+ * This function programs a phase offset value into one of the two phase registers.
+ * The phase value in degrees is converted to a 12-bit register value using the
+ * global phase constant.
+ * 
+ * Phase calculation: phase_register = phase_degrees * phase_const
+ * where phase_const = 4096 / 360 ≈ 651.8986469
+ * 
+ * The phase affects the output waveform by shifting it in time relative to
+ * the phase reference. Phase values are typically in the range 0-360 degrees.
+ *
+ * @param dev             - The device structure
+ * @param register_number - Phase register number (0 or 1)
+ * @param phase_value     - Phase value in degrees (0-360)
  *
 ******************************************************************************/
 void ad9833_set_phase(struct ad9833_dev *dev,
@@ -510,21 +548,47 @@ void ad9833_set_phase(struct ad9833_dev *dev,
 {
 	uint16_t phase_calc;
 
+	DEBUG_PRINT("Setting phase: %.2f degrees in register: %d", phase_value, register_number);
+
+	/* Convert phase in degrees to 12-bit register value */
 	phase_calc = (uint16_t)(phase_value * phase_const);
+	
+	DEBUG_PRINT("Calculated phase register value: 0x%04X", phase_calc);
+
+	/* Write phase data to selected register */
 	if (register_number == 0) {
-		ad9833_tx_spi(dev,
-			      BIT_P0ADDRESS + phase_calc);
+		/* Program Phase Register 0 */
+		DEBUG_PRINT("Writing to Phase Register 0");
+		ad9833_tx_spi(dev, BIT_P0ADDRESS + phase_calc);
 	} else {
-		ad9833_tx_spi(dev,
-			      BIT_P1ADDRESS + phase_calc);
+		/* Program Phase Register 1 */
+		DEBUG_PRINT("Writing to Phase Register 1");
+		ad9833_tx_spi(dev, BIT_P1ADDRESS + phase_calc);
 	}
+
+	DEBUG_PRINT("Phase programming completed for register %d", register_number);
 }
 
 /**************************************************************************//**
  * @brief Select the frequency register to be used.
  *
- * @param dev      - The device structure.
- * @param freq_reg - Number of frequency register. (0 / 1)
+ * This function selects which of the two frequency registers is used for
+ * output generation. The selection can be made via software (SPI control
+ * register) or hardware (dedicated GPIO pin) depending on the programming
+ * method configured.
+ * 
+ * Software method (prog_method = 0):
+ * Uses the FSEL bit in the control register to select between:
+ * - freq_reg = 0: Use Frequency Register 0
+ * - freq_reg = 1: Use Frequency Register 1
+ * 
+ * Hardware method (prog_method = 1, AD9834/AD9838 only):
+ * Uses the dedicated FSEL GPIO pin:
+ * - freq_reg = 0: FSEL pin LOW (Frequency Register 0)
+ * - freq_reg = 1: FSEL pin HIGH (Frequency Register 1)
+ *
+ * @param dev      - The device structure
+ * @param freq_reg - Frequency register number to select (0 or 1)
  *
 ******************************************************************************/
 void ad9833_select_freq_reg(struct ad9833_dev *dev,
@@ -532,34 +596,62 @@ void ad9833_select_freq_reg(struct ad9833_dev *dev,
 {
 	uint16_t spi_data = 0;
 
+	DEBUG_PRINT("Selecting frequency register: %d using method: %d", freq_reg, dev->prog_method);
+
+	/* Software programming method - use SPI control register */
 	if (dev->prog_method == 0) {
+		/* Clear FSEL bit while preserving other control register settings */
 		spi_data = (dev->ctrl_reg_value & ~AD9833_CTRLFSEL);
-		// Select soft the working frequency register according to parameter
+		
+		/* Set FSEL bit if selecting register 1 */
 		if (freq_reg == 1) {
 			spi_data += AD9833_CTRLFSEL;
+			DEBUG_PRINT("FSEL bit set - using Frequency Register 1 via software");
+		} else {
+			DEBUG_PRINT("FSEL bit cleared - using Frequency Register 0 via software");
 		}
-		ad9833_tx_spi(dev,
-			      spi_data);
-		dev->ctrl_reg_value = spi_data;
+		
+		/* Send updated control register */
+		ad9833_tx_spi(dev, spi_data);
+		dev->ctrl_reg_value = spi_data;  /* Update shadow register */
 	} else {
+		/* Hardware programming method - use dedicated FSEL GPIO pin */
 		if (dev->prog_method == 1) {
-			// Select hard the working frequency register according to parameter
 			if (freq_reg == 1) {
 				AD9834_FSEL_HIGH;
+				DEBUG_PRINT("FSEL pin set HIGH - using Frequency Register 1 via hardware");
 			} else {
 				if (freq_reg == 0) {
 					AD9834_FSEL_LOW;
+					DEBUG_PRINT("FSEL pin set LOW - using Frequency Register 0 via hardware");
 				}
 			}
 		}
 	}
+
+	DEBUG_PRINT("Frequency register selection completed");
 }
 
 /**************************************************************************//**
  * @brief Select the phase register to be used.
  *
- * @param dev       - The device structure.
- * @param phase_reg - Number of phase register. (0 / 1)
+ * This function selects which of the two phase registers is used for
+ * output generation. The selection can be made via software (SPI control
+ * register) or hardware (dedicated GPIO pin) depending on the programming
+ * method configured.
+ * 
+ * Software method (prog_method = 0):
+ * Uses the PSEL bit in the control register to select between:
+ * - phase_reg = 0: Use Phase Register 0
+ * - phase_reg = 1: Use Phase Register 1
+ * 
+ * Hardware method (prog_method = 1, AD9834/AD9838 only):
+ * Uses the dedicated PSEL GPIO pin:
+ * - phase_reg = 0: PSEL pin LOW (Phase Register 0)
+ * - phase_reg = 1: PSEL pin HIGH (Phase Register 1)
+ *
+ * @param dev       - The device structure
+ * @param phase_reg - Phase register number to select (0 or 1)
  *
 ******************************************************************************/
 void ad9833_select_phase_reg(struct ad9833_dev *dev,
@@ -567,34 +659,62 @@ void ad9833_select_phase_reg(struct ad9833_dev *dev,
 {
 	uint16_t spi_data = 0;
 
+	DEBUG_PRINT("Selecting phase register: %d using method: %d", phase_reg, dev->prog_method);
+
+	/* Software programming method - use SPI control register */
 	if (dev->prog_method == 0) {
+		/* Clear PSEL bit while preserving other control register settings */
 		spi_data = (dev->ctrl_reg_value & ~AD9833_CTRLPSEL);
-		// Select soft the working phase register according to parameter
+		
+		/* Set PSEL bit if selecting register 1 */
 		if (phase_reg == 1) {
 			spi_data += AD9833_CTRLPSEL;
+			DEBUG_PRINT("PSEL bit set - using Phase Register 1 via software");
+		} else {
+			DEBUG_PRINT("PSEL bit cleared - using Phase Register 0 via software");
 		}
-		ad9833_tx_spi(dev,
-			      spi_data);
-		dev->ctrl_reg_value = spi_data;
+		
+		/* Send updated control register */
+		ad9833_tx_spi(dev, spi_data);
+		dev->ctrl_reg_value = spi_data;  /* Update shadow register */
 	} else {
+		/* Hardware programming method - use dedicated PSEL GPIO pin */
 		if (dev->prog_method == 1) {
-			// Select hard the working phase register according to parameter
 			if (phase_reg == 1) {
 				AD9834_PSEL_HIGH;
+				DEBUG_PRINT("PSEL pin set HIGH - using Phase Register 1 via hardware");
 			} else {
 				if (phase_reg == 0) {
 					AD9834_PSEL_LOW;
+					DEBUG_PRINT("PSEL pin set LOW - using Phase Register 0 via hardware");
 				}
 			}
 		}
 	}
+
+	DEBUG_PRINT("Phase register selection completed");
 }
 
 /**************************************************************************//**
  * @brief Sets the programming method. (only for AD9834 & AD9838)
  *
- * @param dev   - The device structure.
- * @param value - soft or hard method. (0 / 1)
+ * This function configures how frequency and phase register selection is controlled
+ * on AD9834 and AD9838 devices. These devices support two programming methods:
+ * 
+ * Software method (value = 0):
+ * - Register selection via SPI control register bits (FSEL, PSEL)
+ * - More flexible, allows software control of register switching
+ * - Default method, compatible with all devices
+ * 
+ * Hardware method (value = 1):
+ * - Register selection via dedicated GPIO pins (FSEL, PSEL)
+ * - Faster switching, useful for real-time frequency/phase changes
+ * - Only available on AD9834 and AD9838 devices
+ * 
+ * The PINSW bit in the control register enables/disables hardware pin control.
+ *
+ * @param dev   - The device structure
+ * @param value - Programming method selection (0=software, 1=hardware)
  *
 ******************************************************************************/
 void ad9834_select_prog_method(struct ad9833_dev *dev,
@@ -602,24 +722,54 @@ void ad9834_select_prog_method(struct ad9833_dev *dev,
 {
 	uint16_t spi_data = (dev->ctrl_reg_value & ~AD9834_CTRLPINSW);
 
-	dev->prog_method = 0;        // software method
+	DEBUG_PRINT("Setting programming method: %d (0=software, 1=hardware)", value);
+
+	/* Default to software programming method */
+	dev->prog_method = 0;
+	
 	if (value == 1) {
-		spi_data += AD9834_CTRLPINSW;
-		dev->prog_method = 1;    // hardware method
+		/* Enable hardware programming method */
+		spi_data += AD9834_CTRLPINSW;  /* Set PINSW bit */
+		dev->prog_method = 1;
+		DEBUG_PRINT("Hardware programming method enabled - using GPIO pins for register selection");
+	} else {
+		DEBUG_PRINT("Software programming method enabled - using SPI register bits for selection");
 	}
-	ad9833_tx_spi(dev,
-		      spi_data);
-	dev->ctrl_reg_value = spi_data;
+	
+	/* Send updated control register */
+	ad9833_tx_spi(dev, spi_data);
+	dev->ctrl_reg_value = spi_data;  /* Update shadow register */
+
+	DEBUG_PRINT("Programming method configuration completed");
 }
 
 /**************************************************************************//**
  * @brief Configures the control register for logic output.
  *        (only for AD9834 & AD9838)
  *
- * @param dev     - The device structure.
- * @param opbiten - Enables / disables the logic output.
- * @param signpib - Connects comparator / MSB to the SIGN BIT OUT pin.
- * @param div2    - MSB / MSB/2
+ * This function configures the logic output functionality available on AD9834
+ * and AD9838 devices. When enabled, the device can output digital logic levels
+ * instead of analog waveforms, useful for clock generation and digital applications.
+ * 
+ * Logic output parameters:
+ * - opbiten: Enables/disables logic output mode
+ *   - 0: Disable logic output (normal analog operation)
+ *   - 1: Enable logic output mode
+ * 
+ * - signpib: Controls what signal drives the SIGN BIT OUT pin (when opbiten=1)
+ *   - 0: Connect comparator output to SIGN BIT OUT pin
+ *   - 1: Connect MSB of DAC data to SIGN BIT OUT pin
+ * 
+ * - div2: Controls output amplitude/frequency division (when opbiten=1)
+ *   - 0: Full MSB output
+ *   - 1: MSB/2 output (divided by 2)
+ * 
+ * Note: Triangle mode is not available when logic output is enabled.
+ *
+ * @param dev     - The device structure
+ * @param opbiten - Enable/disable logic output (0 or 1)
+ * @param signpib - SIGN BIT OUT source selection (0 or 1)
+ * @param div2    - Output division control (0 or 1)
  *
 ******************************************************************************/
 void ad9834_logic_output(struct ad9833_dev *dev,
@@ -629,37 +779,55 @@ void ad9834_logic_output(struct ad9833_dev *dev,
 {
 	uint16_t spi_data = 0;
 
+	DEBUG_PRINT("Configuring logic output - opbiten: %d, signpib: %d, div2: %d", 
+	            opbiten, signpib, div2);
+
+	/* Clear all logic output control bits while preserving other settings */
 	spi_data = (dev->ctrl_reg_value & ~(AD9833_CTRLOPBITEN |
 					    AD9833_CTRLMODE    |
 					    AD9834_CTRLSIGNPIB |
 					    AD9833_CTRLDIV2));
 
-
+	/* Configure logic output mode */
 	if (opbiten == 1) {
+		/* Enable logic output mode */
 		spi_data |= AD9833_CTRLOPBITEN;
+		DEBUG_PRINT("Logic output mode enabled");
 
+		/* Configure SIGN BIT OUT pin source */
 		if (signpib == 1) {
 			spi_data |= AD9834_CTRLSIGNPIB;
+			DEBUG_PRINT("SIGN BIT OUT connected to MSB of DAC data");
 		} else {
 			if (signpib == 0) {
 				spi_data &= ~AD9834_CTRLSIGNPIB;
+				DEBUG_PRINT("SIGN BIT OUT connected to comparator output");
 			}
 		}
+		
+		/* Configure output division */
 		if (div2 == 1) {
 			spi_data |= AD9833_CTRLDIV2;
+			DEBUG_PRINT("Output division enabled (MSB/2)");
 		} else {
 			if (div2 == 0) {
 				spi_data &= ~AD9833_CTRLDIV2;
+				DEBUG_PRINT("No output division (full MSB)");
 			}
 		}
 	} else {
+		/* Disable logic output mode */
 		if (opbiten == 0) {
 			spi_data &= ~AD9833_CTRLOPBITEN;
+			DEBUG_PRINT("Logic output mode disabled - normal analog operation");
 		}
 	}
-	ad9833_tx_spi(dev,
-		      spi_data);
-	dev->ctrl_reg_value = spi_data;
+	
+	/* Send updated control register */
+	ad9833_tx_spi(dev, spi_data);
+	dev->ctrl_reg_value = spi_data;  /* Update shadow register */
+
+	DEBUG_PRINT("Logic output configuration completed");
 }
 
 
