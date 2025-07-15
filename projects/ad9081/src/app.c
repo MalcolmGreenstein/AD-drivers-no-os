@@ -50,6 +50,7 @@
 #include "parameters.h"
 #include "app_config.h"
 #include "xil_cache.h"
+#include "mcs_gpio.h"
 
 #ifdef IIO_SUPPORT
 #include "iio_app.h"
@@ -95,6 +96,12 @@ int main(void)
 
 	struct no_os_gpio_init_param gpio_lf_input_pin_init = {
 		.number = 107,
+		.platform_ops = &xil_gpio_ops,
+		.extra = &xil_gpio_param
+	};
+
+	struct no_os_gpio_init_param gpio_req_init = {
+		.number = PHY_SYNC,
 		.platform_ops = &xil_gpio_ops,
 		.extra = &xil_gpio_param
 	};
@@ -237,8 +244,14 @@ int main(void)
 		TX_DMA_BASEADDR,
 		IRQ_DISABLED
 	};
+
+	struct mcs_gpio_init_param mcs_gpio_init_params = {
+		.gpio_req = &gpio_req_init,
+	};
+
 	struct axi_dmac *tx_dmac;
 	struct ad9081_phy* phy[MULTIDEVICE_INSTANCE_COUNT];
+	struct mcs_gpio_dev *mcs_dev;
 	int32_t status;
 	int32_t i;
 
@@ -324,6 +337,10 @@ int main(void)
 					    (phy[i]->jrx_link_tx[0].jesd_param.jesd_duallink > 0 ? 2 : 1);
 	}
 
+	status = mcs_gpio_init(&mcs_dev, &mcs_gpio_init_params);
+	if (status)
+		printf("mcs_gpio_init() error: %" PRId32 "\n", status);
+
 	struct jesd204_topology *topology;
 	struct jesd204_topology_dev devs[] = {
 		{
@@ -339,6 +356,11 @@ int main(void)
 		},
 		{
 			.jdev = tx_jesd->jdev,
+			.link_ids = {DEFRAMER_LINK0_TX},
+			.links_number = 1,
+		},
+		{
+			.jdev = mcs_dev->jdev,
 			.link_ids = {DEFRAMER_LINK0_TX},
 			.links_number = 1,
 		},
